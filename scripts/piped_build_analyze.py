@@ -7,6 +7,7 @@ import datetime as dt
 import pprint 
 from sets import Set
 import math
+import copy
 
 class FileInfo:
   def __init__(self, a_filename):
@@ -16,7 +17,7 @@ class FileInfo:
     self.__isDelete = False
     self.__isCreate = False
     self.__isStat   = False
-    self.__referenceCount = 1
+    self.__close_on_exec = False
   def SetReadOn(self):
     self.__isRead = True
   def SetReadOn(self):
@@ -29,6 +30,8 @@ class FileInfo:
     self.__isCreate = True
   def SetStatOn(self):
     self.__isStat = True
+  def SetCloseOnExecOn(self):
+    self.__close_on_exec = True
   def IsRead(self):
     return self.__isRead
   def IsWrite(self):
@@ -39,19 +42,10 @@ class FileInfo:
     return self.__isCreate
   def IsStat(self):
     return self.__isStat
-  def AddRef(self):
-    self.__referenceCount += 1
-  def Release(self):
-    self.__referenceCount -= 1
-  def IsReferenced(self):
-    return self.__referenceCount > 1
-  def ReferenceCount(self):
-    return self.__referenceCount
+  def IsCloseOnExec(self):
+    return self.__close_on_exec
 
 class ProcessInfo:
-  Stdin  = FileInfo("\"stdin\"")
-  Stdout = FileInfo("\"stdout\"")
-  Stderr = FileInfo("\"stderr\"")
   __id = 1
 
   def __init__(self, a_processId, a_currentDir, a_baseFiles, a_startDateTime):
@@ -66,11 +60,13 @@ class ProcessInfo:
     self.ChildProcess  = []
     self.CompletedFiles = {}
     self.Files = {}
-    self.Files[0] = ProcessInfo.Stdin
-    self.Files[1] = ProcessInfo.Stdout
-    self.Files[2] = ProcessInfo.Stderr
+    self.Files[0] = FileInfo("\"stdin\"")
+    self.Files[1] = FileInfo("\"stdout\"")
+    self.Files[2] = FileInfo("\"stderr\"")
+    # sys.stderr.write("New Process:\n")
     for descriptor, fileInfo in a_baseFiles.iteritems():
-      self.Files[descriptor] = fileInfo
+      # sys.stderr.write("    " + str(descriptor) + " " + fileInfo.Name + ":" +  str(fileInfo.IsCloseOnExec()) + "\n")
+      self.Files[descriptor] = copy.deepcopy(fileInfo)
 
 class ProcessInfoCollection:
   def __init__(self, a_startDir):
@@ -78,6 +74,7 @@ class ProcessInfoCollection:
     self.__startDir = a_startDir
     
   def AddProcess(self, a_basePid, a_createPid, a_startDateTime):
+    #sys.stderr.write("AddProcess:" + str(a_basePid) + "->" + str(a_createPid) + "\n")
     if a_basePid == -1:
       info = ProcessInfo(a_createPid, self.__startDir, {}, a_startDateTime)
     else:
@@ -86,44 +83,57 @@ class ProcessInfoCollection:
     self.__dict[a_createPid] = info
 
   def CloseProcess(self, a_processId):
+    #sys.stderr.write("CloseProcess:" + str(a_processId) + "\n")
     return self.__dict.pop(a_processId)
   
   def AddOpenFile(self, a_processId, a_descriptor, a_filename):
+    #sys.stderr.write("AddOpenFile:" + str(a_processId) + ":" + str(a_descriptor) + " " + a_filename + "\n")
     if a_filename[0:3] == "\"./":
       filename = "\"" + self.__dict[a_processId].Dir + a_filename[2:]
+    elif a_filename[1] != "/":
+      filename = "\"" + self.__dict[a_processId].Dir + "/" + a_filename[1:]
     else:
       filename = a_filename
     self.__dict[a_processId].Files[a_descriptor] = FileInfo(filename)
+
+  def AddPipe(self, a_processId, a_inputDescriptor, a_outputDescriptor):
+    #sys.stderr.write("AddPipe:" + str(a_processId) + ":" + str(a_inputDescriptor) + "->" + str(a_outputDescriptor) + "\n")
+    self.__dict[a_processId].Files[a_inputDescriptor]  = FileInfo("\"pipe\"")
+    self.__dict[a_processId].Files[a_outputDescriptor] = FileInfo("\"pipe\"")
   
   def GetOpenFile(self, a_processId, a_descriptor):
     return self.__dict[a_processId].Files[a_descriptor]
   
-  def ChangeOpenFile(self, a_processId, a_descriptorFrom, a_descriptorTo):
-    self.__dict[a_processId].Files[a_descriptorTo] = self.__dict[a_processId].Files[a_descriptorFrom]
-    self.__dict[a_processId].Files[a_descriptorTo].AddRef()
+  def DupOpenFile(self, a_processId, a_descriptorFrom, a_descriptorTo):
+    #sys.stderr.write("DupOpenFile:" + str(a_processId) + ":" + str(a_descriptorFrom) + "->" + str(a_descriptorTo) + "\n")
+    if a_descriptorTo in self.__dict[a_processId].Files:
+      self.CloseFile(a_processId, a_descriptorTo)
+
+    self.__dict[a_processId].Files[a_descriptorTo] = copy.deepcopy(self.__dict[a_processId].Files[a_descriptorFrom])
 
   def CloseFile(self, a_processId, a_descriptor):
-    if self.__dict[a_processId].Files[a_descriptor].IsReferenced():
-      self.__dict[a_processId].Files[a_descriptor].Release()
-    else:
-      tmp = self.__dict[a_processId].Files[a_descriptor]
-      if tmp != ProcessInfo.Stdin or tmp != ProcessInfo.Stdout or tmp != ProcessInfo.Stderr: 
-        del self.__dict[a_processId].Files[a_descriptor]
-        if tmp.Name in self.__dict[a_processId].CompletedFiles:
-          d = self.__dict[a_processId].CompletedFiles[tmp.Name]
-          if d.IsRead():
-            d.SetReadOn()
-          if d.IsWrite():
-            d.SetWriteOn()
-          if d.IsDelete():
-            d.SetDeleteOn()
-          if d.IsCreate():
-            d.SetCreateOn()
-          if d.IsStat():
-            d.SetStatOn()
-          self.__dict[a_processId].CompletedFiles[tmp.Name] = d
-        else:
-          self.__dict[a_processId].CompletedFiles[tmp.Name] = tmp
+    #sys.stderr.write("CloseFile:" + str(a_processId) + ":" + str(a_descriptor) + "\n")
+    tmp = self.__dict[a_processId].Files[a_descriptor]
+    if  tmp.Name != "stdin"  \
+    and tmp.Name != "stdout" \
+    and tmp.Name != "stderr" \
+    and tmp.Name != "pipe":
+      del self.__dict[a_processId].Files[a_descriptor]
+      if tmp.Name in self.__dict[a_processId].CompletedFiles:
+        d = self.__dict[a_processId].CompletedFiles[tmp.Name]
+        if d.IsRead():
+          d.SetReadOn()
+        if d.IsWrite():
+          d.SetWriteOn()
+        if d.IsDelete():
+          d.SetDeleteOn()
+        if d.IsCreate():
+          d.SetCreateOn()
+        if d.IsStat():
+          d.SetStatOn()
+        self.__dict[a_processId].CompletedFiles[tmp.Name] = d
+      else:
+        self.__dict[a_processId].CompletedFiles[tmp.Name] = tmp
 
   def ChangeDir(self, a_processId, a_directory):
     self.__dict[a_processId].Dir = a_directory
@@ -144,9 +154,18 @@ class ProcessInfoCollection:
     else:
       return None
 
+  def CloseFilesCloseOnExec(self, a_processId):
+    files = self.__dict[a_processId].Files
+    closeFiles = []
+    for descriptor, fileInfo in files.iteritems():
+      if fileInfo.IsCloseOnExec():
+        closeFiles.append(descriptor)
+    for descriptor in closeFiles:
+        self.CloseFile(a_processId, descriptor)
+
 class Parser:
   def __init__(self, a_startDir):
-    # pid   time     ms     syscall       ---arg---                ret us
+    # pid   hour min sec ms     syscall       ---arg---                ret us
     # 23006 18:59:27.331042 open("/etc/init.d/xinetd", O_RDONLY) = 0 <0.000007>
     #
     # Caution : _exit and exit_group do not have Time(<0.000007>)
@@ -175,17 +194,21 @@ class Parser:
 
     if m:
       if m.group("unfinished"):
-        self.unfinish[int(m.group("pid"))] = m.group("pid") + "   " + m.group("unfinished")
+        self.unfinish[int(m.group("pid"))] = "%s %s:%s:%s.%s %s" % (m.group("pid"), m.group("hour"), m.group("min"), m.group("sec"), m.group("ms"), m.group("unfinished"))
+        # sys.stderr.write("unfinished:" + a_line+"\n")
       elif m.group("resumed"):
         line = self.unfinish[int(m.group("pid"))] + m.group("resumed")
-        self.__dispatch(line, m, self.m_processCollection)
+        m2 = self.reLine.match(line)
+        # sys.stderr.write("resumed:" + line+"\n")
+        self.__dispatch(m2, self.m_processCollection)
       else:
-        self.__dispatch(a_line, m, self.m_processCollection)
+        self.__dispatch(m, self.m_processCollection)
         
-  def __dispatch(self, a_line, a_match, a_collection):
+  def __dispatch(self, a_match, a_collection):
     syscall = a_match.group("syscall")
     # 989   04:51:17.911406 clone(child_stack=0, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, child_tidptr=0x2b967bdc1fe0) = 990 <0.000050>
-    if syscall == "clone":
+    # 18912 05:40:35.694551 vfork()           = 18913 <0.000157>
+    if syscall == "clone" or syscall == "vfork":
       a_collection.AddProcess(int(a_match.group("pid")), int(a_match.group("ret")), Parser.__getDateTime(a_match))
       
     # 989   04:51:17.691293 execve("./test_main.sh", ["./test_main.sh"], [/* 22 vars */]) = 0 <0.000066>
@@ -197,6 +220,7 @@ class Parser:
       
       tmp = Parser.__parseArgument(a_match.group("arg"))
       a_collection.SetProcessInfo(pid, tmp[0], tmp[1])
+      a_collection.CloseFilesCloseOnExec(pid)
     
     # 990   04:51:17.952055 open("/etc/ld.so.cache", O_RDONLY) = 3 <0.000007>
     elif syscall == "open":
@@ -236,9 +260,11 @@ class Parser:
 
     # 573  11:53:59.224510 close(3)                          = 0 <0.000355>
     elif syscall == "close":
-      pid = int(a_match.group("pid"))
-      descriptor = int(Parser.__parseArgument(a_match.group("arg"))[0])
-      a_collection.CloseFile(pid, descriptor)
+      ret = int(a_match.group("ret"))
+      if ret >= 0:
+        pid = int(a_match.group("pid"))
+        descriptor = int(Parser.__parseArgument(a_match.group("arg"))[0])
+        a_collection.CloseFile(pid, descriptor)
 
     # 3714  03:28:48.254705 rename("/tmp/from.dat", "/tmp/to.dat") = 0 <0.002298>
     elif syscall == "rename":
@@ -253,31 +279,64 @@ class Parser:
       a_collection.AddOpenFile(pid, -1, toFile)
       a_collection.GetOpenFile(pid, -1).SetCreateOn()
       a_collection.CloseFile(pid, -1)
+
+    # 11412 04:08:30.836925 pipe([3, 4])      = 0 <0.000008>
+    elif syscall == "pipe":
+      pid = int(a_match.group("pid"))
+      arg = Parser.__parseArgument(a_match.group("arg"))[0] # "[3, 4]""
+      arg = arg[1: -1] # "3, 4"
+      comma = arg.find(",")
+      inputDescriptor  = int(arg[0: comma])
+      outputDescriptor = int(arg[comma + 1 :])
+      a_collection.AddPipe(pid, inputDescriptor, outputDescriptor)
     
     # 3744  03:37:33.936350 chdir("/tmp")     = 0 <0.000365>
     elif syscall == "chdir":
       pid = int(a_match.group("pid"))
       dirname = Parser.__parseArgument(a_match.group("arg"))[0]
-      a_collection.ChangeDir(pid, dirname)
+      a_collection.ChangeDir(pid, dirname[1:-1]) # [1:-1] is remove double quotation
     
     # 573   11:53:59.198558 dup2(3, 255)                      = 255
     elif syscall == "dup2":
       pid = int(a_match.group("pid"))
       args = Parser.__parseArgument(a_match.group("arg"))
-      a_collection.ChangeOpenFile(pid, int(args[0]), int(args[1]))
+      a_collection.DupOpenFile(pid, int(args[0]), int(args[1]))
+
+    # 19908 07:01:20.612911 fcntl(1, F_DUPFD, 10) = 10 <0.000003>
+    # 19908 07:01:20.612939 fcntl(10, F_SETFD, FD_CLOEXEC) = 0 <0.000003>
+    # 20354 09:31:44.226753 fcntl(10, F_GETFD) = 0x1 (flags FD_CLOEXEC) <0.000002>
+    elif syscall == "fcntl":
+      ret = int(a_match.group("ret"), 0) # As the result may be a hexadecimal number (0x##), specify 0 for the second argument of int.
+      if ret >= 0:
+        pid  = int(a_match.group("pid"))
+        args = Parser.__parseArgument(a_match.group("arg"))
+        desc = int(args[0])
+        cmd  = args[1]
+        if cmd == "F_DUPFD":
+          a_collection.DupOpenFile(pid, desc, ret)
+        if cmd == "F_DUPFD_CLOEXEC":
+          a_collection.DupOpenFile(pid, desc, ret)
+          a_collection.GetOpenFile(pid, ret).SetCloseOnExecOn()
+        if cmd == "F_SETFD" and args[2] == "FD_CLOEXEC":
+          a_collection.GetOpenFile(pid, desc).SetCloseOnExecOn()
 
     # 3715  03:28:48.355670 unlink("/tmp/to.dat") = 0 <0.000838>
     elif syscall == "unlink":
-      pid = int(a_match.group("pid"))
-      filename = Parser.__parseArgument(a_match.group("arg"))[0]
-      a_collection.AddOpenFile(pid, -1, filename)
-      a_collection.GetOpenFile(pid, -1).SetDeleteOn()
-      a_collection.CloseFile(pid, -1)
+      ret = int(a_match.group("ret"))
+      if ret >= 0:
+        pid = int(a_match.group("pid"))
+        filename = Parser.__parseArgument(a_match.group("arg"))[0]
+        a_collection.AddOpenFile(pid, -1, filename)
+        a_collection.GetOpenFile(pid, -1).SetDeleteOn()
+        a_collection.CloseFile(pid, -1)
 
     # 3713  03:28:47.965553 exit_group(0)     = ?
     # 23149 11:54:02.235461 _exit(0)          = ?
     elif syscall == "_exit" or syscall == "exit_group":
       tmp = a_collection.CloseProcess(int(a_match.group("pid")))
+      if tmp.ProcessName == "":
+         tmp.ProcessName = "\"thread\""
+
       tmp.EndDateTime = Parser.__getDateTime(a_match)
       self.m_completedProcessList.append(tmp)
       
@@ -403,11 +462,50 @@ class TimeFormatter:
     pass
 
 def main():
-  parser = Parser(sys.argv[1])
-  for line in sys.stdin:
-    parser.Parse(line)
+  # analyze option
+  skip = 0
+  option = ""
+  dir = ""
+  prefix = ""
+  debug = False
+  for index, arg in enumerate(sys.argv):
+    if skip > 0:
+      skip -= 1
+      if option == "--dir":
+        dir = arg
+      elif option == "--file-prefix":
+        prefix = arg
+    else:
+      if arg == "--dir":
+        option = arg
+        skip = 1
+      elif arg == "--file-prefix":
+        option = arg
+        skip = 1
+      elif arg == "--debug":
+        debug = True
+
+  if dir == "" or prefix == "":
+    sys.stderr.write("Usage: piped_build_analyze.py --dir root-dir --file-prefix file-prefix [--debug]\n")
+    sys.stderr.write("       input dir is [" + dir + "]\n")
+    sys.stderr.write("       input prefix is [" + prefix + "]\n")
+    sys.exit()
+
+  # execute
+  parser = Parser(dir)
+  if debug:
+    f = open(prefix + ".debug.txt", "w")
+    try:
+      for line in sys.stdin:
+        f.write(line)
+        parser.Parse(line)
+    finally:
+      f.close()
+  else:
+    for line in sys.stdin:
+      parser.Parse(line)
     
-  DependFormatter.Output(sys.argv[2] + ".cypher", parser.GetParseResult())
+  DependFormatter.Output(prefix + ".cypher", parser.GetParseResult())
 
 if __name__ == "__main__":
   main()
