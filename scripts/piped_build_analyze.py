@@ -8,6 +8,7 @@ import pprint
 from sets import Set
 import math
 import copy
+import os
 
 class FileInfo:
   def __init__(self, a_filename):
@@ -89,11 +90,14 @@ class ProcessInfoCollection:
   def AddOpenFile(self, a_processId, a_descriptor, a_filename):
     #sys.stderr.write("AddOpenFile:" + str(a_processId) + ":" + str(a_descriptor) + " " + a_filename + "\n")
     if a_filename[0:3] == "\"./":
-      filename = "\"" + self.__dict[a_processId].Dir + a_filename[2:]
+      elimQuote = self.__dict[a_processId].Dir + a_filename[2:-1]
     elif a_filename[1] != "/":
-      filename = "\"" + self.__dict[a_processId].Dir + "/" + a_filename[1:]
+      elimQuote = self.__dict[a_processId].Dir + "/" + a_filename[1:-1]
     else:
-      filename = a_filename
+      elimQuote = a_filename[1:-1]
+    filename = "\"" + os.path.abspath(elimQuote) + "\""
+    
+    # Since there are cases of /a/b/../c, use abspath.
     self.__dict[a_processId].Files[a_descriptor] = FileInfo(filename)
 
   def AddPipe(self, a_processId, a_inputDescriptor, a_outputDescriptor):
@@ -114,10 +118,10 @@ class ProcessInfoCollection:
   def CloseFile(self, a_processId, a_descriptor):
     #sys.stderr.write("CloseFile:" + str(a_processId) + ":" + str(a_descriptor) + "\n")
     tmp = self.__dict[a_processId].Files[a_descriptor]
-    if  tmp.Name != "stdin"  \
-    and tmp.Name != "stdout" \
-    and tmp.Name != "stderr" \
-    and tmp.Name != "pipe":
+    if  tmp.Name != "\"stdin\""  \
+    and tmp.Name != "\"stdout\"" \
+    and tmp.Name != "\"stderr\"" \
+    and tmp.Name != "\"pipe\"":
       del self.__dict[a_processId].Files[a_descriptor]
       if tmp.Name in self.__dict[a_processId].CompletedFiles:
         d = self.__dict[a_processId].CompletedFiles[tmp.Name]
@@ -396,53 +400,46 @@ class DependFormatter:
     f = open(a_fileName, "w")
     try:
       # Output process nodes
-      plen = len(a_collection)
-      pwidth = int(math.log10(plen)) + 1
-      f.write("Create\n")
+      diff = a_collection[-1].EndDateTime - a_collection[-1].StartDateTime
+      total_seconds = diff.days * 3600 * 24 + diff.seconds + diff.microseconds / 1000000.0
+      
       for p in a_collection:
         diff = p.EndDateTime - p.StartDateTime
         diff_seconds = diff.days * 3600 * 24 + diff.seconds + diff.microseconds / 1000000.0
-        parameter = p.Parameter.replace("\"", "'")
-        f.write("    (pid%0*d:Process{id:%0*d, dir:\"%s\", time:%f, name:%s, param:\"%s\"}),\n" % (pwidth, p.Id, pwidth, p.Id, p.Dir, diff_seconds, p.ProcessName, parameter))
+        usage = 100.0 * diff_seconds / total_seconds # The unit is% 
+        parameter = p.Parameter.replace("\"", "'").replace("&&", "& &") # Neo4j use "&&" as command separator, so I replace it.
+        f.write("CREATE (:Process{id:%0d, dir:\"%s\", time:%f, usage:%fname:%s, , param:\"%s\"});\n" % (p.Id, p.Dir, diff_seconds, usage, p.ProcessName, parameter))
       f.write("\n")
 
       # Output process relations
       for p in a_collection:
         for c in p.ChildProcess:
-          f.write("    (pid%0*d)-[:CALL]->(pid%0*d),\n" % (pwidth, p.Id, pwidth, c.Id))
+          f.write("MATCH (a:Process),(b:Process) WHERE a.id = %d AND b.id = %d CREATE (a)-[:CALL]->(b);\n" % (p.Id, c.Id))
       f.write("\n")
 
       # Create unique file set
       uniqueFile = {}
-      fid = 1
       for p in a_collection:
         for file in p.CompletedFiles.keys():
           if not file in uniqueFile:
-            uniqueFile[file] = fid
-            fid += 1
-
+            uniqueFile[file] = file
+      
+      # Create unique file set
       # Output file nodes
-      flen = len(uniqueFile)
-      fwidth = int(math.log10(flen)) + 1
-      for file, fid in uniqueFile.iteritems():
-        f.write("    (fid%0*d:File{name:%s}),\n" % (fwidth, fid, file))
+      for file in uniqueFile:
+        f.write("CREATE (:File{name:%s});\n" % (file))
       f.write("\n")
 
       # Create relations of process to file
       for p in a_collection:
         for file in p.CompletedFiles.keys():
-          fid = uniqueFile[file]
           tmp = p.CompletedFiles[file]
           read = str(tmp.IsRead())
           write = str(tmp.IsWrite())
           delete = str(tmp.IsDelete())
           create = str(tmp.IsCreate())
-          f.write("    (pid%0*d)-[:ACCESS{read:%-6s, write:%-6s, delete:%-6s, create:%-6s}]->(fid%0*d),\n" % (pwidth, p.Id, read, write, delete, create, fwidth, fid))
-
-      # To end with a semicolon, make :Dummy and delete it
+          f.write("MATCH (a:Process),(b:File) WHERE a.id = %d AND b.name = %s CREATE (a)-[:ACCESS{read:%-6s, write:%-6s, delete:%-6s, create:%-6s}]->(b);\n" % (p.Id, file, read, write, delete, create))
       f.write("\n")
-      f.write("    (:DUMMY);\n")
-      f.write("MATCH (d:DUMMY) DELETE d;\n")
 
     finally:
       f.close()
@@ -505,6 +502,7 @@ def main():
     for line in sys.stdin:
       parser.Parse(line)
     
+  # output
   DependFormatter.Output(prefix + ".cypher", parser.GetParseResult())
 
 if __name__ == "__main__":
