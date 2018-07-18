@@ -64,9 +64,7 @@ class ProcessInfo:
     self.Files[0] = FileInfo("\"stdin\"")
     self.Files[1] = FileInfo("\"stdout\"")
     self.Files[2] = FileInfo("\"stderr\"")
-    # sys.stderr.write("New Process:\n")
     for descriptor, fileInfo in a_baseFiles.iteritems():
-      # sys.stderr.write("    " + str(descriptor) + " " + fileInfo.Name + ":" +  str(fileInfo.IsCloseOnExec()) + "\n")
       self.Files[descriptor] = copy.deepcopy(fileInfo)
 
 class ProcessInfoCollection:
@@ -75,7 +73,6 @@ class ProcessInfoCollection:
     self.__startDir = a_startDir
     
   def AddProcess(self, a_basePid, a_createPid, a_startDateTime):
-    #sys.stderr.write("AddProcess:" + str(a_basePid) + "->" + str(a_createPid) + "\n")
     if a_basePid == -1:
       info = ProcessInfo(a_createPid, self.__startDir, {}, a_startDateTime)
     else:
@@ -84,11 +81,9 @@ class ProcessInfoCollection:
     self.__dict[a_createPid] = info
 
   def CloseProcess(self, a_processId):
-    #sys.stderr.write("CloseProcess:" + str(a_processId) + "\n")
     return self.__dict.pop(a_processId)
   
   def AddOpenFile(self, a_processId, a_descriptor, a_filename):
-    #sys.stderr.write("AddOpenFile:" + str(a_processId) + ":" + str(a_descriptor) + " " + a_filename + "\n")
     if a_filename[0:3] == "\"./":
       elimQuote = self.__dict[a_processId].Dir + a_filename[2:-1]
     elif a_filename[1] != "/":
@@ -101,7 +96,6 @@ class ProcessInfoCollection:
     self.__dict[a_processId].Files[a_descriptor] = FileInfo(filename)
 
   def AddPipe(self, a_processId, a_inputDescriptor, a_outputDescriptor):
-    #sys.stderr.write("AddPipe:" + str(a_processId) + ":" + str(a_inputDescriptor) + "->" + str(a_outputDescriptor) + "\n")
     self.__dict[a_processId].Files[a_inputDescriptor]  = FileInfo("\"pipe\"")
     self.__dict[a_processId].Files[a_outputDescriptor] = FileInfo("\"pipe\"")
   
@@ -109,14 +103,12 @@ class ProcessInfoCollection:
     return self.__dict[a_processId].Files[a_descriptor]
   
   def DupOpenFile(self, a_processId, a_descriptorFrom, a_descriptorTo):
-    #sys.stderr.write("DupOpenFile:" + str(a_processId) + ":" + str(a_descriptorFrom) + "->" + str(a_descriptorTo) + "\n")
     if a_descriptorTo in self.__dict[a_processId].Files:
       self.CloseFile(a_processId, a_descriptorTo)
 
     self.__dict[a_processId].Files[a_descriptorTo] = copy.deepcopy(self.__dict[a_processId].Files[a_descriptorFrom])
 
   def CloseFile(self, a_processId, a_descriptor):
-    #sys.stderr.write("CloseFile:" + str(a_processId) + ":" + str(a_descriptor) + "\n")
     tmp = self.__dict[a_processId].Files[a_descriptor]
     if  tmp.Name != "\"stdin\""  \
     and tmp.Name != "\"stdout\"" \
@@ -188,22 +180,12 @@ class Parser:
 
   def Parse(self, a_line):
     m = self.reLine.match(a_line)
-    #if m:
-    #  if m.group("syscall"):
-    #    sys.stderr.write(m.group("syscall") + ":" + a_line)
-    #  else:
-    #    sys.stderr.write("Partial match:" + a_line)
-    #else:
-    #  sys.stderr.write("No match: " + a_line)
-
     if m:
       if m.group("unfinished"):
         self.unfinish[int(m.group("pid"))] = "%s %s:%s:%s.%s %s" % (m.group("pid"), m.group("hour"), m.group("min"), m.group("sec"), m.group("ms"), m.group("unfinished"))
-        # sys.stderr.write("unfinished:" + a_line+"\n")
       elif m.group("resumed"):
         line = self.unfinish[int(m.group("pid"))] + m.group("resumed")
         m2 = self.reLine.match(line)
-        # sys.stderr.write("resumed:" + line+"\n")
         self.__dispatch(m2, self.m_processCollection)
       else:
         self.__dispatch(m, self.m_processCollection)
@@ -399,22 +381,26 @@ class DependFormatter:
   def Output(a_fileName, a_collection):
     f = open(a_fileName, "w")
     try:
-      # Output process nodes
+      # Output process table
       diff = a_collection[-1].EndDateTime - a_collection[-1].StartDateTime
       total_seconds = diff.days * 3600 * 24 + diff.seconds + diff.microseconds / 1000000.0
       
+      f.write("@processes\n")
       for p in a_collection:
         diff = p.EndDateTime - p.StartDateTime
         diff_seconds = diff.days * 3600 * 24 + diff.seconds + diff.microseconds / 1000000.0
         usage = 100.0 * diff_seconds / total_seconds # The unit is% 
-        parameter = p.Parameter.replace("\"", "'").replace("&&", "& &") # Neo4j use "&&" as command separator, so I replace it.
-        f.write("CREATE (:Process{id:%0d, dir:\"%s\", time:%f, usage:%fname:%s, , param:\"%s\"});\n" % (p.Id, p.Dir, diff_seconds, usage, p.ProcessName, parameter))
+        parameter = p.Parameter.replace("\"", "'")
+        f.write("%d,%s,\"%s\",%f,%f,\"%s\"\n" % (p.Id, p.ProcessName, p.Dir, diff_seconds, usage, parameter))
+
       f.write("\n")
 
       # Output process relations
+      f.write("@calls\n")
       for p in a_collection:
         for c in p.ChildProcess:
-          f.write("MATCH (a:Process),(b:Process) WHERE a.id = %d AND b.id = %d CREATE (a)-[:CALL]->(b);\n" % (p.Id, c.Id))
+          f.write("%d,%d,\n" % (p.Id, c.Id))
+
       f.write("\n")
 
       # Create unique file set
@@ -424,34 +410,32 @@ class DependFormatter:
           if not file in uniqueFile:
             uniqueFile[file] = file
       
-      # Create unique file set
       # Output file nodes
-      for file in uniqueFile:
-        f.write("CREATE (:File{name:%s});\n" % (file))
+      f.write("@files\n")
+      for file in uniqueFile.keys():
+        f.write("%s\n" % (file))
+
       f.write("\n")
 
       # Create relations of process to file
+      f.write("@accesses\n")
       for p in a_collection:
         for file in p.CompletedFiles.keys():
           tmp = p.CompletedFiles[file]
-          read = str(tmp.IsRead())
-          write = str(tmp.IsWrite())
-          delete = str(tmp.IsDelete())
-          create = str(tmp.IsCreate())
-          f.write("MATCH (a:Process),(b:File) WHERE a.id = %d AND b.name = %s CREATE (a)-[:ACCESS{read:%-6s, write:%-6s, delete:%-6s, create:%-6s}]->(b);\n" % (p.Id, file, read, write, delete, create))
+          if tmp.IsRead(): read = 1
+          else: read = 0
+          if tmp.IsWrite(): write = 1
+          else: write = 0
+          if tmp.IsDelete(): delete = 1
+          else: delete = 0
+          if tmp.IsCreate(): create = 1
+          else: create = 0
+          f.write("%d,%s,%d,%d,%d,%d\n" % (p.Id, file, read, write, delete, create))
+          
       f.write("\n")
 
     finally:
       f.close()
-
-    # for p in a_collection:
-    #   sys.stderr.write(str(p.Id) + " " + p.ProcessName + ":" + str(p.StartDateTime) + " - " + str(p.EndDateTime) + "\n")
-    #   sys.stderr.write("Call Process:\n")
-    #   for c in p.ChildProcess:
-    #     sys.stderr.write("    [" + c.ProcessName + "]\n")
-    #   sys.stderr.write("Access File:\n")
-    #   for c in p.CompletedFiles.values():
-    #     sys.stderr.write("    [" + c.Name + "]\n")
 
 class TimeFormatter:
   @staticmethod
@@ -503,7 +487,7 @@ def main():
       parser.Parse(line)
     
   # output
-  DependFormatter.Output(prefix + ".cypher", parser.GetParseResult())
+  DependFormatter.Output(prefix + ".csv", parser.GetParseResult())
 
 if __name__ == "__main__":
   main()
